@@ -1,5 +1,6 @@
 import type { Theme } from "@/App";
 import { Button } from "@/components/ui/button";
+import { usePortfolio } from "@/context/PortfolioContext";
 import { useInternetIdentity } from "@/hooks/useInternetIdentity";
 import { cn } from "@/lib/utils";
 import { useQueryClient } from "@tanstack/react-query";
@@ -8,6 +9,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Coins,
+  Download,
   Gem,
   Landmark,
   LayoutDashboard,
@@ -18,9 +20,10 @@ import {
   ShieldCheck,
   Sun,
   TrendingUp,
+  Upload,
   X,
 } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 export type Page =
   | "dashboard"
@@ -89,10 +92,29 @@ export default function Layout({
   const [mobileOpen, setMobileOpen] = useState(false);
   const { clear } = useInternetIdentity();
   const queryClient = useQueryClient();
+  const { exportData, importData } = usePortfolio();
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   function handleLogout() {
     queryClient.clear();
     clear();
+  }
+
+  function handleImportClick() {
+    fileInputRef.current?.click();
+  }
+
+  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const text = ev.target?.result as string;
+      importData(text);
+    };
+    reader.readAsText(file);
+    // reset so same file can be re-uploaded
+    e.target.value = "";
   }
 
   const SidebarContent = () => (
@@ -187,6 +209,64 @@ export default function Layout({
           </button>
         </div>
       )}
+
+      {/* Data Backup / Restore */}
+      <div
+        className={cn(
+          "px-4 py-3 border-t border-sidebar-border",
+          collapsed ? "flex flex-col items-center gap-2" : "space-y-2",
+        )}
+      >
+        {!collapsed && (
+          <p className="text-[10px] text-muted-foreground uppercase tracking-wide font-medium">
+            Data Backup
+          </p>
+        )}
+        <div className={cn("flex gap-2", collapsed && "flex-col")}>
+          <button
+            data-ocid="nav.export.button"
+            type="button"
+            onClick={exportData}
+            title="Download backup"
+            className={cn(
+              "flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-xs font-medium transition-colors",
+              "border border-sidebar-border hover:bg-sidebar-accent text-muted-foreground hover:text-foreground",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+              collapsed
+                ? "w-8 h-8 justify-center px-0"
+                : "flex-1 justify-center",
+            )}
+          >
+            <Download className="w-3.5 h-3.5 flex-shrink-0" />
+            {!collapsed && <span>Download</span>}
+          </button>
+          <button
+            data-ocid="nav.import.button"
+            type="button"
+            onClick={handleImportClick}
+            title="Upload backup"
+            className={cn(
+              "flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-xs font-medium transition-colors",
+              "border border-sidebar-border hover:bg-sidebar-accent text-muted-foreground hover:text-foreground",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+              collapsed
+                ? "w-8 h-8 justify-center px-0"
+                : "flex-1 justify-center",
+            )}
+          >
+            <Upload className="w-3.5 h-3.5 flex-shrink-0" />
+            {!collapsed && <span>Upload</span>}
+          </button>
+        </div>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".json,application/json"
+          className="hidden"
+          onChange={handleFileChange}
+          data-ocid="nav.import.dropzone"
+        />
+      </div>
 
       {/* Theme Toggle */}
       <div
@@ -340,7 +420,7 @@ export default function Layout({
 
         {/* Page content */}
         <main className="flex-1 overflow-y-auto scrollbar-thin">
-          <div className="p-4 md:p-6 lg:p-8 max-w-7xl mx-auto">{children}</div>
+          <div className="p-4 md:p-6 lg:p-8 w-full">{children}</div>
         </main>
       </div>
     </div>

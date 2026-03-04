@@ -52,52 +52,80 @@ export async function searchMutualFunds(
 }
 
 /**
- * Fetch latest NAV for an NPS scheme via the backend canister (server-side HTTP outcall).
+ * Fetch latest NAV for an NPS scheme directly from npsnav.in via a CORS proxy.
  * API: GET https://npsnav.in/api/{pfmId}
- * The canister returns a plain number string e.g. "55.074"
- * Requires an authenticated actor – pass the one from PortfolioContext.
+ * The endpoint returns a plain number string e.g. "55.074"
  */
-export async function fetchNPSNav(
-  pfmId: string,
-  actor: { fetchNPSNav: (pfmId: string) => Promise<string> },
-): Promise<number | null> {
+export async function fetchNPSNav(pfmId: string): Promise<number | null> {
+  const targetUrl = `https://npsnav.in/api/${encodeURIComponent(pfmId)}`;
+
+  // Strategy 1: allorigins /get endpoint (returns JSON with "contents" field)
   try {
-    const raw = await actor.fetchNPSNav(pfmId);
-    if (!raw) return null;
-
-    const trimmed = raw.trim();
-
-    // Try direct parse first (plain number like "55.074")
-    const direct = Number.parseFloat(trimmed);
-    if (!Number.isNaN(direct) && direct > 0) return direct;
-
-    // Try JSON parse in case the endpoint returns { nav: "55.074" } or { data: { nav: ... } }
-    try {
-      const json = JSON.parse(trimmed) as unknown;
-      if (typeof json === "number" && json > 0) return json;
-      if (json && typeof json === "object") {
-        const obj = json as Record<string, unknown>;
-        const candidates = [
-          obj.nav,
-          obj.NAV,
-          obj.price,
-          (obj.data as Record<string, unknown> | undefined)?.nav,
-        ];
-        for (const c of candidates) {
-          if (c !== undefined && c !== null) {
-            const v = Number.parseFloat(String(c));
-            if (!Number.isNaN(v) && v > 0) return v;
-          }
-        }
+    const res = await fetch(
+      `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`,
+      { signal: AbortSignal.timeout(12000) },
+    );
+    if (res.ok) {
+      const json = (await res.json()) as { contents?: string };
+      const text = (json?.contents ?? "").trim();
+      if (text) {
+        const nav = Number.parseFloat(text);
+        if (!Number.isNaN(nav) && nav > 0) return nav;
       }
-    } catch {
-      // not JSON – ignore
     }
-
-    return null;
   } catch {
-    return null;
+    // fall through
   }
+
+  // Strategy 2: allorigins /raw endpoint
+  try {
+    const res = await fetch(
+      `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`,
+      { signal: AbortSignal.timeout(12000) },
+    );
+    if (res.ok) {
+      const text = (await res.text()).trim();
+      if (text) {
+        const nav = Number.parseFloat(text);
+        if (!Number.isNaN(nav) && nav > 0) return nav;
+      }
+    }
+  } catch {
+    // fall through
+  }
+
+  // Strategy 3: corsproxy.io
+  try {
+    const res = await fetch(
+      `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`,
+      { signal: AbortSignal.timeout(12000) },
+    );
+    if (res.ok) {
+      const text = (await res.text()).trim();
+      if (text) {
+        const nav = Number.parseFloat(text);
+        if (!Number.isNaN(nav) && nav > 0) return nav;
+      }
+    }
+  } catch {
+    // fall through
+  }
+
+  // Strategy 4: direct fetch (works if browser allows CORS or in dev mode)
+  try {
+    const res = await fetch(targetUrl, { signal: AbortSignal.timeout(10000) });
+    if (res.ok) {
+      const text = (await res.text()).trim();
+      if (text) {
+        const nav = Number.parseFloat(text);
+        if (!Number.isNaN(nav) && nav > 0) return nav;
+      }
+    }
+  } catch {
+    // exhausted all strategies
+  }
+
+  return null;
 }
 
 /**

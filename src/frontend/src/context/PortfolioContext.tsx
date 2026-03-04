@@ -1,4 +1,10 @@
-import type { backendInterface } from "@/backend";
+import {
+  calcCompoundInterest,
+  calcSimpleInterest,
+  freqToTimesPerYear,
+  todayStr,
+  yearsBetween,
+} from "@/utils/format";
 import {
   fetchMFNAV,
   fetchNPSNav,
@@ -164,114 +170,57 @@ interface PortfolioContextValue {
   refreshSGBPrices: () => Promise<void>;
 
   clearAllData: () => void;
+  exportData: () => void;
+  importData: (jsonString: string) => boolean;
 }
 
-// ─── Backend conversion helpers ────────────────────────────────────────────
+// ─── SessionStorage helpers ────────────────────────────────────────────────
 
-/** Convert backend MutualFundHolding (bigint lastUpdated) → frontend type */
-function fromBackendMF(
-  h: import("@/backend.d").MutualFundHolding,
-): MutualFundHolding {
-  return { ...h, lastUpdated: Number(h.lastUpdated) };
-}
+const SESSION_KEYS = {
+  mutualFunds: "portfolio_mf",
+  stocks: "portfolio_stocks",
+  debt: "portfolio_debt",
+  nps: "portfolio_nps",
+  sgb: "portfolio_sgb",
+  transactions: "portfolio_txs",
+} as const;
 
-function toBackendMF(
-  h: MutualFundHolding,
-): import("@/backend.d").MutualFundHolding {
-  return { ...h, lastUpdated: BigInt(h.lastUpdated) };
-}
-
-function fromBackendStock(h: import("@/backend.d").StockHolding): StockHolding {
-  return {
-    ...h,
-    assetType: h.assetType as "stock" | "etf",
-    lastUpdated: Number(h.lastUpdated),
-  };
-}
-
-function toBackendStock(h: StockHolding): import("@/backend.d").StockHolding {
-  return { ...h, lastUpdated: BigInt(h.lastUpdated) };
-}
-
-/** Backend DebtHolding has no metadata field - we store metadata as JSON in the `name` field via a separator, or just ignore it.
- * Since the backend type omits metadata, we map: frontend DebtHolding ↔ backend DebtHolding
- * metadata is kept in frontend state only (not persisted to backend).
- * For backward compatibility, metadata is stored as a JSON suffix in the `name` field.
- */
-function fromBackendDebt(h: import("@/backend.d").DebtHolding): DebtHolding {
-  // Try to extract metadata from name if it contains a JSON suffix
-  let name = h.name;
-  let metadata: Record<string, string | number | boolean> = {};
-  const sep = "|||";
-  const sepIdx = h.name.lastIndexOf(sep);
-  if (sepIdx !== -1) {
-    try {
-      metadata = JSON.parse(h.name.slice(sepIdx + sep.length)) as Record<
-        string,
-        string | number | boolean
-      >;
-      name = h.name.slice(0, sepIdx);
-    } catch {
-      // ignore parse errors
-    }
+function loadFromSession<T>(key: string, fallback: T): T {
+  try {
+    const raw = sessionStorage.getItem(key);
+    if (!raw) return fallback;
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
   }
-  return {
-    ...h,
-    name,
-    debtType: h.debtType as "epf" | "ppf" | "fd" | "other",
-    metadata,
-    lastUpdated: Number(h.lastUpdated),
-  };
 }
 
-function toBackendDebt(h: DebtHolding): import("@/backend.d").DebtHolding {
-  const sep = "|||";
-  const metaStr = Object.keys(h.metadata).length
-    ? sep + JSON.stringify(h.metadata)
-    : "";
-  return {
-    id: h.id,
-    debtType: h.debtType,
-    name: h.name + metaStr,
-    principal: h.principal,
-    interestRate: h.interestRate,
-    startDate: h.startDate,
-    maturityDate: h.maturityDate,
-    currentValue: h.currentValue,
-    lastUpdated: BigInt(h.lastUpdated),
-  };
+function saveToSession(key: string, value: unknown): void {
+  try {
+    sessionStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Ignore storage quota errors
+  }
 }
 
-function fromBackendNps(h: import("@/backend.d").NpsHolding): NpsHolding {
-  return {
-    ...h,
-    tier: h.tier as "I" | "II",
-    lastUpdated: Number(h.lastUpdated),
-  };
-}
+// ─── Debt current value helper (mirrors DebtInvestments.tsx logic) ─────────
 
-function toBackendNps(h: NpsHolding): import("@/backend.d").NpsHolding {
-  return { ...h, lastUpdated: BigInt(h.lastUpdated) };
-}
-
-function fromBackendSgb(h: import("@/backend.d").SgbHolding): SgbHolding {
-  return { ...h, lastUpdated: Number(h.lastUpdated) };
-}
-
-function toBackendSgb(h: SgbHolding): import("@/backend.d").SgbHolding {
-  return { ...h, lastUpdated: BigInt(h.lastUpdated) };
-}
-
-function fromBackendTx(t: import("@/backend.d").Transaction): Transaction {
-  return {
-    ...t,
-    assetType: t.assetType as "mutualfund" | "stock" | "etf" | "debt",
-    transactionType: t.transactionType as "buy" | "sell",
-  };
-}
-
-function toBackendTx(t: Transaction): import("@/backend.d").Transaction {
-  return { ...t };
+function calcDebtCurrentValueForTotals(h: DebtHolding): number {
+  const today = todayStr();
+  const years = yearsBetween(h.startDate, today);
+  switch (h.debtType) {
+    case "fd": {
+      const freq = freqToTimesPerYear(
+        String(h.metadata.compoundingFrequency || "quarterly"),
+      );
+      return calcCompoundInterest(h.principal, h.interestRate, years, freq);
+    }
+    case "ppf":
+    case "epf":
+      return h.currentValue; // user-maintained balance
+    default:
+      return calcSimpleInterest(h.principal, h.interestRate, years);
+  }
 }
 
 // ─── Compute Totals ────────────────────────────────────────────────────────
@@ -300,7 +249,10 @@ function computeTotals(
   const etfValue = allEtfs.reduce((s, h) => s + h.quantity * h.currentPrice, 0);
   const etfInvested = allEtfs.reduce((s, h) => s + h.quantity * h.buyPrice, 0);
 
-  const debtValue = debt.reduce((s, h) => s + h.currentValue, 0);
+  const debtValue = debt.reduce(
+    (s, h) => s + calcDebtCurrentValueForTotals(h),
+    0,
+  );
   const debtInvested = debt.reduce((s, h) => s + h.principal, 0);
 
   const npsValue = nps.reduce((s, h) => s + h.units * h.currentNAV, 0);
@@ -355,18 +307,29 @@ function uid(): string {
 
 interface PortfolioProviderProps {
   children: ReactNode;
-  actor: backendInterface;
 }
 
-export function PortfolioProvider({ children, actor }: PortfolioProviderProps) {
+export function PortfolioProvider({ children }: PortfolioProviderProps) {
   // ── State ──────────────────────────────────────────────────────────────
-  const [mutualFunds, setMutualFunds] = useState<MutualFundHolding[]>([]);
-  const [stocks, setStocks] = useState<StockHolding[]>([]);
-  const [debtHoldings, setDebt] = useState<DebtHolding[]>([]);
-  const [npsHoldings, setNps] = useState<NpsHolding[]>([]);
-  const [sgbHoldings, setSgb] = useState<SgbHolding[]>([]);
-  const [transactions, setTransactions] = useState<Transaction[]>([]);
-  const [isLoadingData, setIsLoadingData] = useState(true);
+  const [mutualFunds, setMutualFunds] = useState<MutualFundHolding[]>(() =>
+    loadFromSession(SESSION_KEYS.mutualFunds, []),
+  );
+  const [stocks, setStocks] = useState<StockHolding[]>(() =>
+    loadFromSession(SESSION_KEYS.stocks, []),
+  );
+  const [debtHoldings, setDebt] = useState<DebtHolding[]>(() =>
+    loadFromSession(SESSION_KEYS.debt, []),
+  );
+  const [npsHoldings, setNps] = useState<NpsHolding[]>(() =>
+    loadFromSession(SESSION_KEYS.nps, []),
+  );
+  const [sgbHoldings, setSgb] = useState<SgbHolding[]>(() =>
+    loadFromSession(SESSION_KEYS.sgb, []),
+  );
+  const [transactions, setTransactions] = useState<Transaction[]>(() =>
+    loadFromSession(SESSION_KEYS.transactions, []),
+  );
+  const [isLoadingData] = useState(false);
 
   const [isRefreshingMF, setRefreshingMF] = useState(false);
   const [isRefreshingStocks, setRefreshingStocks] = useState(false);
@@ -374,43 +337,30 @@ export function PortfolioProvider({ children, actor }: PortfolioProviderProps) {
   const [isRefreshingSGB, setRefreshingSGB] = useState(false);
   const [lastRefreshed, setLastRefreshed] = useState<number | null>(null);
 
-  // ── Load all data from canister on mount ───────────────────────────────
+  // ── Persist to sessionStorage on state changes ─────────────────────────
   useEffect(() => {
-    let cancelled = false;
+    saveToSession(SESSION_KEYS.mutualFunds, mutualFunds);
+  }, [mutualFunds]);
 
-    async function loadData() {
-      setIsLoadingData(true);
-      try {
-        const [mfs, stks, debt, nps, sgb, txs] = await Promise.all([
-          actor.getMutualFunds(),
-          actor.getStocks(),
-          actor.getDebtHoldings(),
-          actor.getNpsHoldings(),
-          actor.getSgbHoldings(),
-          actor.getTransactions(),
-        ]);
-        if (cancelled) return;
-        setMutualFunds(mfs.map(fromBackendMF));
-        setStocks(stks.map(fromBackendStock));
-        setDebt(debt.map(fromBackendDebt));
-        setNps(nps.map(fromBackendNps));
-        setSgb(sgb.map(fromBackendSgb));
-        setTransactions(txs.map(fromBackendTx));
-      } catch (err) {
-        if (!cancelled) {
-          console.error("Failed to load portfolio data:", err);
-          toast.error("Failed to load portfolio data from canister.");
-        }
-      } finally {
-        if (!cancelled) setIsLoadingData(false);
-      }
-    }
+  useEffect(() => {
+    saveToSession(SESSION_KEYS.stocks, stocks);
+  }, [stocks]);
 
-    void loadData();
-    return () => {
-      cancelled = true;
-    };
-  }, [actor]);
+  useEffect(() => {
+    saveToSession(SESSION_KEYS.debt, debtHoldings);
+  }, [debtHoldings]);
+
+  useEffect(() => {
+    saveToSession(SESSION_KEYS.nps, npsHoldings);
+  }, [npsHoldings]);
+
+  useEffect(() => {
+    saveToSession(SESSION_KEYS.sgb, sgbHoldings);
+  }, [sgbHoldings]);
+
+  useEffect(() => {
+    saveToSession(SESSION_KEYS.transactions, transactions);
+  }, [transactions]);
 
   // ── Computed totals ────────────────────────────────────────────────────
   const totals = computeTotals(
@@ -430,66 +380,24 @@ export function PortfolioProvider({ children, actor }: PortfolioProviderProps) {
         lastUpdated: Date.now(),
       };
       setMutualFunds((prev) => [...prev, h]);
-      try {
-        await actor.addMutualFund(toBackendMF(h));
-      } catch (err) {
-        setMutualFunds((prev) => prev.filter((x) => x.id !== h.id));
-        toast.error("Failed to save mutual fund. Please try again.");
-        throw err;
-      }
     },
-    [actor],
+    [],
   );
 
   const updateMutualFund = useCallback(
     async (id: string, updates: Partial<MutualFundHolding>) => {
-      let previous: MutualFundHolding | undefined;
-      setMutualFunds((prev) => {
-        previous = prev.find((h) => h.id === id);
-        return prev.map((h) =>
+      setMutualFunds((prev) =>
+        prev.map((h) =>
           h.id === id ? { ...h, ...updates, lastUpdated: Date.now() } : h,
-        );
-      });
-      try {
-        const updated = mutualFunds.find((h) => h.id === id);
-        if (updated) {
-          await actor.updateMutualFund(
-            id,
-            toBackendMF({ ...updated, ...updates, lastUpdated: Date.now() }),
-          );
-        }
-      } catch (err) {
-        if (previous) {
-          setMutualFunds((prev) =>
-            prev.map((h) => (h.id === id ? previous! : h)),
-          );
-        }
-        toast.error("Failed to update mutual fund. Please try again.");
-        throw err;
-      }
+        ),
+      );
     },
-    [actor, mutualFunds],
+    [],
   );
 
-  const deleteMutualFund = useCallback(
-    async (id: string) => {
-      let previous: MutualFundHolding | undefined;
-      setMutualFunds((prev) => {
-        previous = prev.find((h) => h.id === id);
-        return prev.filter((h) => h.id !== id);
-      });
-      try {
-        await actor.deleteMutualFund(id);
-      } catch (err) {
-        if (previous) {
-          setMutualFunds((prev) => [...prev, previous!]);
-        }
-        toast.error("Failed to delete mutual fund. Please try again.");
-        throw err;
-      }
-    },
-    [actor],
-  );
+  const deleteMutualFund = useCallback(async (id: string) => {
+    setMutualFunds((prev) => prev.filter((h) => h.id !== id));
+  }, []);
 
   // ── CRUD: Stocks ───────────────────────────────────────────────────────
   const addStock = useCallback(
@@ -500,292 +408,106 @@ export function PortfolioProvider({ children, actor }: PortfolioProviderProps) {
         lastUpdated: Date.now(),
       };
       setStocks((prev) => [...prev, h]);
-      try {
-        await actor.addStock(toBackendStock(h));
-      } catch (err) {
-        setStocks((prev) => prev.filter((x) => x.id !== h.id));
-        toast.error("Failed to save stock/ETF. Please try again.");
-        throw err;
-      }
     },
-    [actor],
+    [],
   );
 
   const updateStock = useCallback(
     async (id: string, updates: Partial<StockHolding>) => {
-      let previous: StockHolding | undefined;
-      setStocks((prev) => {
-        previous = prev.find((h) => h.id === id);
-        return prev.map((h) =>
+      setStocks((prev) =>
+        prev.map((h) =>
           h.id === id ? { ...h, ...updates, lastUpdated: Date.now() } : h,
-        );
-      });
-      try {
-        const updated = stocks.find((h) => h.id === id);
-        if (updated) {
-          await actor.updateStock(
-            id,
-            toBackendStock({ ...updated, ...updates, lastUpdated: Date.now() }),
-          );
-        }
-      } catch (err) {
-        if (previous) {
-          setStocks((prev) => prev.map((h) => (h.id === id ? previous! : h)));
-        }
-        toast.error("Failed to update stock/ETF. Please try again.");
-        throw err;
-      }
+        ),
+      );
     },
-    [actor, stocks],
+    [],
   );
 
-  const deleteStock = useCallback(
-    async (id: string) => {
-      let previous: StockHolding | undefined;
-      setStocks((prev) => {
-        previous = prev.find((h) => h.id === id);
-        return prev.filter((h) => h.id !== id);
-      });
-      try {
-        await actor.deleteStock(id);
-      } catch (err) {
-        if (previous) {
-          setStocks((prev) => [...prev, previous!]);
-        }
-        toast.error("Failed to delete stock/ETF. Please try again.");
-        throw err;
-      }
-    },
-    [actor],
-  );
+  const deleteStock = useCallback(async (id: string) => {
+    setStocks((prev) => prev.filter((h) => h.id !== id));
+  }, []);
 
   // ── CRUD: Debt ─────────────────────────────────────────────────────────
   const addDebt = useCallback(
     async (holding: Omit<DebtHolding, "id" | "lastUpdated">) => {
       const h: DebtHolding = { ...holding, id: uid(), lastUpdated: Date.now() };
       setDebt((prev) => [...prev, h]);
-      try {
-        await actor.addDebt(toBackendDebt(h));
-      } catch (err) {
-        setDebt((prev) => prev.filter((x) => x.id !== h.id));
-        toast.error("Failed to save debt holding. Please try again.");
-        throw err;
-      }
     },
-    [actor],
+    [],
   );
 
   const updateDebt = useCallback(
     async (id: string, updates: Partial<DebtHolding>) => {
-      let previous: DebtHolding | undefined;
-      setDebt((prev) => {
-        previous = prev.find((h) => h.id === id);
-        return prev.map((h) =>
+      setDebt((prev) =>
+        prev.map((h) =>
           h.id === id ? { ...h, ...updates, lastUpdated: Date.now() } : h,
-        );
-      });
-      try {
-        const updated = debtHoldings.find((h) => h.id === id);
-        if (updated) {
-          await actor.updateDebt(
-            id,
-            toBackendDebt({ ...updated, ...updates, lastUpdated: Date.now() }),
-          );
-        }
-      } catch (err) {
-        if (previous) {
-          setDebt((prev) => prev.map((h) => (h.id === id ? previous! : h)));
-        }
-        toast.error("Failed to update debt holding. Please try again.");
-        throw err;
-      }
+        ),
+      );
     },
-    [actor, debtHoldings],
+    [],
   );
 
-  const deleteDebt = useCallback(
-    async (id: string) => {
-      let previous: DebtHolding | undefined;
-      setDebt((prev) => {
-        previous = prev.find((h) => h.id === id);
-        return prev.filter((h) => h.id !== id);
-      });
-      try {
-        await actor.deleteDebt(id);
-      } catch (err) {
-        if (previous) {
-          setDebt((prev) => [...prev, previous!]);
-        }
-        toast.error("Failed to delete debt holding. Please try again.");
-        throw err;
-      }
-    },
-    [actor],
-  );
+  const deleteDebt = useCallback(async (id: string) => {
+    setDebt((prev) => prev.filter((h) => h.id !== id));
+  }, []);
 
   // ── CRUD: NPS ──────────────────────────────────────────────────────────
   const addNps = useCallback(
     async (holding: Omit<NpsHolding, "id" | "lastUpdated">) => {
       const h: NpsHolding = { ...holding, id: uid(), lastUpdated: Date.now() };
       setNps((prev) => [...prev, h]);
-      try {
-        await actor.addNps(toBackendNps(h));
-      } catch (err) {
-        setNps((prev) => prev.filter((x) => x.id !== h.id));
-        toast.error("Failed to save NPS holding. Please try again.");
-        throw err;
-      }
     },
-    [actor],
+    [],
   );
 
   const updateNps = useCallback(
     async (id: string, updates: Partial<NpsHolding>) => {
-      let previous: NpsHolding | undefined;
-      setNps((prev) => {
-        previous = prev.find((h) => h.id === id);
-        return prev.map((h) =>
+      setNps((prev) =>
+        prev.map((h) =>
           h.id === id ? { ...h, ...updates, lastUpdated: Date.now() } : h,
-        );
-      });
-      try {
-        const updated = npsHoldings.find((h) => h.id === id);
-        if (updated) {
-          await actor.updateNps(
-            id,
-            toBackendNps({ ...updated, ...updates, lastUpdated: Date.now() }),
-          );
-        }
-      } catch (err) {
-        if (previous) {
-          setNps((prev) => prev.map((h) => (h.id === id ? previous! : h)));
-        }
-        toast.error("Failed to update NPS holding. Please try again.");
-        throw err;
-      }
+        ),
+      );
     },
-    [actor, npsHoldings],
+    [],
   );
 
-  const deleteNps = useCallback(
-    async (id: string) => {
-      let previous: NpsHolding | undefined;
-      setNps((prev) => {
-        previous = prev.find((h) => h.id === id);
-        return prev.filter((h) => h.id !== id);
-      });
-      try {
-        await actor.deleteNps(id);
-      } catch (err) {
-        if (previous) {
-          setNps((prev) => [...prev, previous!]);
-        }
-        toast.error("Failed to delete NPS holding. Please try again.");
-        throw err;
-      }
-    },
-    [actor],
-  );
+  const deleteNps = useCallback(async (id: string) => {
+    setNps((prev) => prev.filter((h) => h.id !== id));
+  }, []);
 
   // ── CRUD: SGB ──────────────────────────────────────────────────────────
   const addSgb = useCallback(
     async (holding: Omit<SgbHolding, "id" | "lastUpdated">) => {
       const h: SgbHolding = { ...holding, id: uid(), lastUpdated: Date.now() };
       setSgb((prev) => [...prev, h]);
-      try {
-        await actor.addSgb(toBackendSgb(h));
-      } catch (err) {
-        setSgb((prev) => prev.filter((x) => x.id !== h.id));
-        toast.error("Failed to save SGB holding. Please try again.");
-        throw err;
-      }
     },
-    [actor],
+    [],
   );
 
   const updateSgb = useCallback(
     async (id: string, updates: Partial<SgbHolding>) => {
-      let previous: SgbHolding | undefined;
-      setSgb((prev) => {
-        previous = prev.find((h) => h.id === id);
-        return prev.map((h) =>
+      setSgb((prev) =>
+        prev.map((h) =>
           h.id === id ? { ...h, ...updates, lastUpdated: Date.now() } : h,
-        );
-      });
-      try {
-        const updated = sgbHoldings.find((h) => h.id === id);
-        if (updated) {
-          await actor.updateSgb(
-            id,
-            toBackendSgb({ ...updated, ...updates, lastUpdated: Date.now() }),
-          );
-        }
-      } catch (err) {
-        if (previous) {
-          setSgb((prev) => prev.map((h) => (h.id === id ? previous! : h)));
-        }
-        toast.error("Failed to update SGB holding. Please try again.");
-        throw err;
-      }
+        ),
+      );
     },
-    [actor, sgbHoldings],
+    [],
   );
 
-  const deleteSgb = useCallback(
-    async (id: string) => {
-      let previous: SgbHolding | undefined;
-      setSgb((prev) => {
-        previous = prev.find((h) => h.id === id);
-        return prev.filter((h) => h.id !== id);
-      });
-      try {
-        await actor.deleteSgb(id);
-      } catch (err) {
-        if (previous) {
-          setSgb((prev) => [...prev, previous!]);
-        }
-        toast.error("Failed to delete SGB holding. Please try again.");
-        throw err;
-      }
-    },
-    [actor],
-  );
+  const deleteSgb = useCallback(async (id: string) => {
+    setSgb((prev) => prev.filter((h) => h.id !== id));
+  }, []);
 
   // ── CRUD: Transactions ─────────────────────────────────────────────────
-  const addTransaction = useCallback(
-    async (tx: Omit<Transaction, "id">) => {
-      const t: Transaction = { ...tx, id: uid() };
-      setTransactions((prev) => [t, ...prev]);
-      try {
-        await actor.addTransaction(toBackendTx(t));
-      } catch (err) {
-        setTransactions((prev) => prev.filter((x) => x.id !== t.id));
-        toast.error("Failed to save transaction. Please try again.");
-        throw err;
-      }
-    },
-    [actor],
-  );
+  const addTransaction = useCallback(async (tx: Omit<Transaction, "id">) => {
+    const t: Transaction = { ...tx, id: uid() };
+    setTransactions((prev) => [t, ...prev]);
+  }, []);
 
-  const deleteTransaction = useCallback(
-    async (id: string) => {
-      let previous: Transaction | undefined;
-      setTransactions((prev) => {
-        previous = prev.find((t) => t.id === id);
-        return prev.filter((t) => t.id !== id);
-      });
-      try {
-        await actor.deleteTransaction(id);
-      } catch (err) {
-        if (previous) {
-          setTransactions((prev) => [...prev, previous!]);
-        }
-        toast.error("Failed to delete transaction. Please try again.");
-        throw err;
-      }
-    },
-    [actor],
-  );
+  const deleteTransaction = useCallback(async (id: string) => {
+    setTransactions((prev) => prev.filter((t) => t.id !== id));
+  }, []);
 
   // ── Price Refresh ──────────────────────────────────────────────────────
   const mfRef = useRef(mutualFunds);
@@ -812,28 +534,35 @@ export function PortfolioProvider({ children, actor }: PortfolioProviderProps) {
   const refreshMFPrices = useCallback(async () => {
     setRefreshingMF(true);
     try {
-      const updated = await Promise.all(
-        mfRef.current.map(async (mf) => {
-          const nav = await fetchMFNAV(mf.schemeCode);
-          return nav !== null
-            ? { ...mf, currentNAV: nav, lastUpdated: Date.now() }
-            : mf;
-        }),
-      );
+      // Fetch NAVs sequentially per unique schemeCode to avoid rate-limit issues
+      const uniqueSchemeCodes = [
+        ...new Set(mfRef.current.map((h) => h.schemeCode)),
+      ];
+      const navMap = new Map<string, number>();
+      for (const schemeCode of uniqueSchemeCodes) {
+        const nav = await fetchMFNAV(schemeCode);
+        if (nav !== null) navMap.set(schemeCode, nav);
+      }
+
+      const updated = mfRef.current.map((mf) => {
+        const nav = navMap.get(mf.schemeCode);
+        return nav !== undefined
+          ? { ...mf, currentNAV: nav, lastUpdated: Date.now() }
+          : mf;
+      });
       setMutualFunds(updated);
-      // Persist updated prices to canister
-      await Promise.all(
-        updated
-          .filter((u, i) => u.currentNAV !== mfRef.current[i]?.currentNAV)
-          .map((u) =>
-            actor.updateMutualFund(u.id, toBackendMF(u)).catch(() => {}),
-          ),
-      );
+
+      const updatedCount = updated.filter(
+        (u, i) => u.currentNAV !== mfRef.current[i]?.currentNAV,
+      ).length;
+      if (updatedCount > 0) {
+        toast.success(`Updated NAV for ${updatedCount} fund(s).`);
+      }
     } finally {
       setRefreshingMF(false);
       setLastRefreshed(Date.now());
     }
-  }, [actor]);
+  }, []);
 
   const refreshStockPrices = useCallback(async () => {
     setRefreshingStocks(true);
@@ -847,82 +576,42 @@ export function PortfolioProvider({ children, actor }: PortfolioProviderProps) {
         }),
       );
       setStocks(updated);
-      // Persist updated prices to canister
-      await Promise.all(
-        updated
-          .filter(
-            (u, i) => u.currentPrice !== stocksRef.current[i]?.currentPrice,
-          )
-          .map((u) =>
-            actor.updateStock(u.id, toBackendStock(u)).catch(() => {}),
-          ),
-      );
     } finally {
       setRefreshingStocks(false);
       setLastRefreshed(Date.now());
     }
-  }, [actor]);
+  }, []);
 
   const refreshNPSPrices = useCallback(async () => {
     setRefreshingNPS(true);
     try {
-      const current = npsRef.current;
-      if (current.length === 0) return;
-
-      // Deduplicate: fetch NAV once per unique pfmId to avoid parallel
-      // duplicate HTTP outcalls (ICP consensus issues) and rate limiting.
-      const uniquePfmIds = [...new Set(current.map((h) => h.pfmId))];
-      const navMap = new Map<string, number | null>();
-
-      // Fetch sequentially to avoid hammering npsnav.in
+      // Fetch NAVs sequentially per unique PFM code to avoid CORS rate-limits
+      const uniquePfmIds = [...new Set(npsRef.current.map((h) => h.pfmId))];
+      const navMap = new Map<string, number>();
       for (const pfmId of uniquePfmIds) {
-        const nav = await fetchNPSNav(pfmId, actor);
-        navMap.set(pfmId, nav);
+        const nav = await fetchNPSNav(pfmId);
+        if (nav !== null) navMap.set(pfmId, nav);
       }
 
-      const now = Date.now();
-      const updated = current.map((h) => {
+      const updated = npsRef.current.map((h) => {
         const nav = navMap.get(h.pfmId);
-        return nav !== null && nav !== undefined
-          ? { ...h, currentNAV: nav, lastUpdated: now }
+        return nav !== undefined
+          ? { ...h, currentNAV: nav, lastUpdated: Date.now() }
           : h;
       });
-
       setNps(updated);
 
-      // Persist updated prices to canister
-      const changedIds = new Set<string>();
-      for (let i = 0; i < updated.length; i++) {
-        if (updated[i].currentNAV !== current[i]?.currentNAV) {
-          changedIds.add(updated[i].id);
-        }
-      }
-      await Promise.all(
-        updated
-          .filter((u) => changedIds.has(u.id))
-          .map((u) => actor.updateNps(u.id, toBackendNps(u)).catch(() => {})),
-      );
-
-      // User feedback
-      const successCount = [...navMap.values()].filter(
-        (v) => v !== null,
+      const updatedCount = updated.filter(
+        (u, i) => u.currentNAV !== npsRef.current[i]?.currentNAV,
       ).length;
-      if (successCount === 0) {
-        toast.error(
-          "Could not fetch NPS NAVs. Check your PFM codes or try again.",
-        );
-      } else if (successCount < uniquePfmIds.length) {
-        toast.warning(
-          `Updated ${successCount}/${uniquePfmIds.length} NPS NAVs. Some PFM codes may be invalid.`,
-        );
-      } else {
-        toast.success("NPS NAVs updated successfully.");
+      if (updatedCount > 0) {
+        toast.success(`Updated NAV for ${updatedCount} NPS holding(s).`);
       }
     } finally {
       setRefreshingNPS(false);
       setLastRefreshed(Date.now());
     }
-  }, [actor]);
+  }, []);
 
   const refreshSGBPrices = useCallback(async () => {
     setRefreshingSGB(true);
@@ -936,25 +625,15 @@ export function PortfolioProvider({ children, actor }: PortfolioProviderProps) {
         }),
       );
       setSgb(updated);
-      // Persist updated prices to canister
-      await Promise.all(
-        updated
-          .filter(
-            (u, i) =>
-              u.currentPricePerGram !== sgbRef.current[i]?.currentPricePerGram,
-          )
-          .map((u) => actor.updateSgb(u.id, toBackendSgb(u)).catch(() => {})),
-      );
     } finally {
       setRefreshingSGB(false);
       setLastRefreshed(Date.now());
     }
-  }, [actor]);
+  }, []);
 
   // ── Auto-refresh on mount and every 5 minutes ──────────────────────────
   const didMount = useRef(false);
   useEffect(() => {
-    if (isLoadingData) return; // Wait for data to load before refreshing
     if (didMount.current) return;
     didMount.current = true;
 
@@ -973,15 +652,90 @@ export function PortfolioProvider({ children, actor }: PortfolioProviderProps) {
       5 * 60 * 1000,
     );
     return () => clearInterval(intervalId);
+  }, [refreshMFPrices, refreshStockPrices, refreshNPSPrices, refreshSGBPrices]);
+
+  // ── Export all data as JSON download ──────────────────────────────────
+  const exportData = useCallback(() => {
+    const payload = {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      mutualFunds: mutualFunds,
+      stocks: stocks,
+      debtHoldings: debtHoldings,
+      npsHoldings: npsHoldings,
+      sgbHoldings: sgbHoldings,
+      transactions: transactions,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `portfolio_backup_${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    toast.success("Portfolio data exported successfully.");
   }, [
-    isLoadingData,
-    refreshMFPrices,
-    refreshStockPrices,
-    refreshNPSPrices,
-    refreshSGBPrices,
+    mutualFunds,
+    stocks,
+    debtHoldings,
+    npsHoldings,
+    sgbHoldings,
+    transactions,
   ]);
 
-  // ── Clear all local state (called on logout) ───────────────────────────
+  // ── Import data from JSON string ───────────────────────────────────────
+  const importData = useCallback((jsonString: string): boolean => {
+    try {
+      const payload = JSON.parse(jsonString);
+      if (!payload || typeof payload !== "object")
+        throw new Error("Invalid format");
+
+      const mfs: MutualFundHolding[] = Array.isArray(payload.mutualFunds)
+        ? payload.mutualFunds
+        : [];
+      const sts: StockHolding[] = Array.isArray(payload.stocks)
+        ? payload.stocks
+        : [];
+      const dbt: DebtHolding[] = Array.isArray(payload.debtHoldings)
+        ? payload.debtHoldings
+        : [];
+      const nps: NpsHolding[] = Array.isArray(payload.npsHoldings)
+        ? payload.npsHoldings
+        : [];
+      const sgb: SgbHolding[] = Array.isArray(payload.sgbHoldings)
+        ? payload.sgbHoldings
+        : [];
+      const txs: Transaction[] = Array.isArray(payload.transactions)
+        ? payload.transactions
+        : [];
+
+      setMutualFunds(mfs);
+      setStocks(sts);
+      setDebt(dbt);
+      setNps(nps);
+      setSgb(sgb);
+      setTransactions(txs);
+
+      saveToSession(SESSION_KEYS.mutualFunds, mfs);
+      saveToSession(SESSION_KEYS.stocks, sts);
+      saveToSession(SESSION_KEYS.debt, dbt);
+      saveToSession(SESSION_KEYS.nps, nps);
+      saveToSession(SESSION_KEYS.sgb, sgb);
+      saveToSession(SESSION_KEYS.transactions, txs);
+
+      toast.success("Portfolio data imported successfully.");
+      return true;
+    } catch {
+      toast.error("Failed to import: invalid or corrupted backup file.");
+      return false;
+    }
+  }, []);
+
+  // ── Clear all session data ─────────────────────────────────────────────
   const clearAllData = useCallback(() => {
     setMutualFunds([]);
     setStocks([]);
@@ -989,6 +743,9 @@ export function PortfolioProvider({ children, actor }: PortfolioProviderProps) {
     setNps([]);
     setSgb([]);
     setTransactions([]);
+    for (const key of Object.values(SESSION_KEYS)) {
+      sessionStorage.removeItem(key);
+    }
     didMount.current = false;
   }, []);
 
@@ -1030,6 +787,8 @@ export function PortfolioProvider({ children, actor }: PortfolioProviderProps) {
         refreshNPSPrices,
         refreshSGBPrices,
         clearAllData,
+        exportData,
+        importData,
       }}
     >
       {children}
