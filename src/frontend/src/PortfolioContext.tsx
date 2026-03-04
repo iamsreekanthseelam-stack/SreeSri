@@ -12,7 +12,6 @@ export const PortfolioProvider: React.FC<{ children: React.ReactNode }> = ({
     const loadPortfolio = async () => {
       try {
         const res = await fetch(`/api/portfolio`);
-        console.log("Fetched data:", data);          // ← see what came back
         if (!res.ok) throw new Error("Failed to fetch");
         const data = await res.json();
 
