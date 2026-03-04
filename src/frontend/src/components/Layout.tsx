@@ -1,7 +1,6 @@
 import type { Theme } from "@/App";
 import { Button } from "@/components/ui/button";
 import { usePortfolio } from "@/context/PortfolioContext";
-import { useInternetIdentity } from "@/hooks/useInternetIdentity";
 import { cn } from "@/lib/utils";
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -90,14 +89,12 @@ export default function Layout({
 }: LayoutProps) {
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
-  const { clear } = useInternetIdentity();
   const queryClient = useQueryClient();
   const { exportData, importData } = usePortfolio();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   function handleLogout() {
     queryClient.clear();
-    clear();
   }
 
   function handleImportClick() {
