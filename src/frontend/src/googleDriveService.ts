@@ -5,23 +5,25 @@ const SCOPES = "https://www.googleapis.com/auth/drive.file";
 
 let tokenClient: any;
 
-export function initGoogleAuth() {
-  return new Promise<void>((resolve) => {
-    window.gapi.load("client", async () => {
-      await window.gapi.client.init({
-        discoveryDocs: [
-          "https://www.googleapis.com/discovery/v1/apis/drive/v3/rest",
-        ],
-      });
+export function initGoogleAuth(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const checkGoogle = () => {
+      if (window.gapi && window.google) {
+        window.gapi.load("client", async () => {
+          await window.gapi.client.init({
+            discoveryDocs: [
+              "https://www.googleapis.com/discovery/v1/apis/drive/v3/rest",
+            ],
+          });
 
-      tokenClient = window.google.accounts.oauth2.initTokenClient({
-        client_id: CLIENT_ID,
-        scope: SCOPES,
-        callback: "",
-      });
+          resolve();
+        });
+      } else {
+        setTimeout(checkGoogle, 200);
+      }
+    };
 
-      resolve();
-    });
+    checkGoogle();
   });
 }
 
