@@ -1,37 +1,40 @@
-// src/googleDriveService.ts
-
-const CLIENT_ID = "993142680699-qnm9j6ru6olsvsqo64ckbmos8rfhrssn.apps.googleusercontent.com";
+const CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID;
 const SCOPES = "https://www.googleapis.com/auth/drive.file";
 
-let tokenClient: any;
+let tokenClient: any = null;
 
-export function initGoogleAuth(): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const checkGoogle = () => {
-      if (window.gapi && window.google) {
-        window.gapi.load("client", async () => {
-          await window.gapi.client.init({
-            discoveryDocs: [
-              "https://www.googleapis.com/discovery/v1/apis/drive/v3/rest",
-            ],
-          });
-
-          resolve();
+export async function initGoogleAuth(): Promise<void> {
+  return new Promise((resolve) => {
+    const checkGoogleLoaded = () => {
+      if (window.google && window.google.accounts) {
+        tokenClient = window.google.accounts.oauth2.initTokenClient({
+          client_id: CLIENT_ID,
+          scope: SCOPES,
+          callback: () => {},
         });
+
+        resolve();
       } else {
-        setTimeout(checkGoogle, 200);
+        setTimeout(checkGoogleLoaded, 200);
       }
     };
 
-    checkGoogle();
+    checkGoogleLoaded();
   });
 }
 
-export function login() {
-  return new Promise<void>((resolve, reject) => {
-    tokenClient.callback = (resp: any) => {
-      if (resp.error) reject(resp);
-      else resolve();
+export async function login(): Promise<string> {
+  if (!tokenClient) {
+    throw new Error("Google Auth not initialized");
+  }
+
+  return new Promise((resolve, reject) => {
+    tokenClient.callback = (response: any) => {
+      if (response.error) {
+        reject(response);
+      } else {
+        resolve(response.access_token);
+      }
     };
 
     tokenClient.requestAccessToken({ prompt: "consent" });
@@ -39,33 +42,20 @@ export function login() {
 }
 
 export async function readJsonFile(fileId: string) {
-  const response = await window.gapi.client.drive.files.get({
-    fileId: fileId,
-    alt: "media",
-  });
+  const accessToken = await login();
 
-  return JSON.parse(response.body);
-}
+  const response = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    }
+  );
 
-export async function updateJsonFile(fileId: string, data: any) {
-  const boundary = "foo_bar_baz";
+  if (!response.ok) {
+    throw new Error("Failed to fetch file");
+  }
 
-  const multipartRequestBody =
-    `--${boundary}\r\n` +
-    "Content-Type: application/json\r\n\r\n" +
-    JSON.stringify({ mimeType: "application/json" }) +
-    `\r\n--${boundary}\r\n` +
-    "Content-Type: application/json\r\n\r\n" +
-    JSON.stringify(data) +
-    `\r\n--${boundary}--`;
-
-  await window.gapi.client.request({
-    path: `/upload/drive/v3/files/${fileId}`,
-    method: "PATCH",
-    params: { uploadType: "multipart" },
-    headers: {
-      "Content-Type": `multipart/related; boundary=${boundary}`,
-    },
-    body: multipartRequestBody,
-  });
+  return response.json();
 }
