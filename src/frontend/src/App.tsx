@@ -1,4 +1,3 @@
-"use client"  // ← ADD THIS FIRST
 import Layout, { type Page } from "@/components/Layout";
 import { Toaster } from "@/components/ui/sonner";
 import { PortfolioProvider } from "@/context/PortfolioContext";
