@@ -7,8 +7,7 @@ export const PortfolioProvider: React.FC<{ children: React.ReactNode }> = ({
   const isInitialLoad = React.useRef(true);
 
   const baseUrl = `https://sreekanth-seelam-frontend.vercel.app`;
-  
-  // 1. Initial Load (GET)
+    // 1. Initial Load (GET)
   useEffect(() => {
     const loadPortfolio = async () => {
       try {
