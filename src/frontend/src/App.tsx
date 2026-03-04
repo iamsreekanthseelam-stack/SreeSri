@@ -13,6 +13,7 @@ import { useEffect, useState } from "react";
 
 export type Theme = "light" | "dark";
 
+console.log("🔴 App rendering");
 // ─── App Content ─────────────────────────────────────────────
 
 function AppContent({
