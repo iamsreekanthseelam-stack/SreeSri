@@ -1,3 +1,4 @@
+"use client"  // ← ADD THIS FIRST
 import Layout, { type Page } from "@/components/Layout";
 import { Toaster } from "@/components/ui/sonner";
 import { PortfolioProvider } from "@/context/PortfolioContext";
@@ -61,6 +62,7 @@ function AppContent({
 
 export default function App() {
   const [theme, setTheme] = useState<Theme>(() => {
+    if (typeof window === "undefined") return "dark"; // ← add this guard
     const saved = localStorage.getItem("portfolio-theme");
     if (saved === "light" || saved === "dark") return saved;
     return "dark";
