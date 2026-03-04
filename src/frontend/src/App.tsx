@@ -131,25 +131,6 @@ export default function App() {
 
   return (
     <PortfolioProvider>
-      {/* Temporary Test Button */}
-      <button
-        onClick={handleLogin}
-        style={{
-          position: "fixed",
-          top: 20,
-          right: 20,
-          zIndex: 9999,
-          padding: "8px 12px",
-          borderRadius: "6px",
-          background: "#2563eb",
-          color: "#fff",
-          border: "none",
-          cursor: "pointer",
-        }}
-      >
-        Connect Google Drive
-      </button>
-
       <AppContent theme={theme} onToggleTheme={toggleTheme} />
 
       <Toaster
